@@ -535,3 +535,35 @@ def delete_market(id):
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
+    # تخزين مؤقت لآخر قراءة من الحساس
+latest_sensor_data = {
+    "temperature": 0.0,
+    "status": "No data yet"
+}
+
+@app.route('/api/sensor_update', methods=['POST'])
+def receive_sensor_data():
+    global latest_sensor_data
+    data = request.get_json()
+    
+    if not data:
+        return jsonify({"error": "No data received"}), 400
+        
+    # استخراج البيانات المرسلة من ESP32
+    temperature = data.get('temperature')
+    device_id = data.get('device_id')
+    
+    # تحديث القيم المؤقتة لتظهر في لوحة التحكم لاحقاً
+    latest_sensor_data = {
+        "temperature": temperature,
+        "device_id": device_id,
+        "status": "Active"
+    }
+    
+    print(f"Received from ESP32 -> Temp: {temperature}C, Device: {device_id}")
+    
+    return jsonify({"status": "success", "message": "Data received successfully"}), 200
+
+@app.route('/api/get_sensor', methods=['GET'])
+def get_sensor_data():
+    return jsonify(latest_sensor_data), 200
