@@ -176,7 +176,7 @@ CLIENT_DASHBOARD_HTML = '''
                                     <th>الحرارة</th>
                                     <th>الحالة الصحية</th>
                                     <th>البطارية</th>
-                                    <th>الكاميرا الحية (ESP32)</th>
+                                    <th>الكاميرا الحية (ESP32-CAM)</th>
                                     <th>المرعى</th>
                                     <th>إجراء طارئ</th>
                                 </tr>
@@ -201,15 +201,13 @@ CLIENT_DASHBOARD_HTML = '''
                                           <div class="modal-dialog modal-dialog-centered">
                                             <div class="modal-content bg-dark text-white border border-warning">
                                               <div class="modal-header border-secondary">
-                                                <h5 class="modal-title text-warning">🔴 البث المباشر للطوق - #{{ a[1] }}</h5>
+                                                <h5 class="modal-title text-warning">🔴 البث الحي للطوق - #{{ a[1] }}</h5>
                                                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                                               </div>
                                               <div class="modal-body text-center">
                                                 <div class="cam-box p-3 border border-success mb-3">
-                                                    <div class="p-3 bg-secondary rounded text-white fw-bold">
-                                                        <i class="fa-solid fa-satellite-dish text-warning fa-2x mb-2"></i><br>
-                                                        جاهز لاستقبال تدفق الكاميرا من ESP32-CAM عبر مسار الـ API
-                                                    </div>
+                                                    <img id="liveCamFeed" src="/api/get_image" alt="البث الحي للمزرعة" class="img-fluid rounded border border-warning" style="max-height: 300px;" onerror="this.onerror=null; this.src='https://via.placeholder.com/320x240?text=No+Live+Feed+Yet';">
+                                                    <p class="text-warning small mt-2">تحديث تلقائي كل ثوانٍ لعرض حركة الكاميرا الحية</p>
                                                 </div>
                                               </div>
                                             </div>
@@ -275,6 +273,14 @@ CLIENT_DASHBOARD_HTML = '''
                 L.marker([{{ a[6] }}, {{ a[7] }}]).addTo(map).bindPopup('<b>#{{ a[1] }}</b><br>الحرارة: {{ a[5] }}°C');
             {% endif %}
         {% endfor %}
+
+        // تحديث صورة الكاميرا تلقائياً كل 3 ثوانٍ لتعطاء إيحاء البث الحي المتجدد
+        setInterval(function() {
+            var img = document.getElementById('liveCamFeed');
+            if (img) {
+                img.src = '/api/get_image?t=' + new Date().getTime();
+            }
+        }, 3000);
     </script>
 </body>
 </html>
@@ -323,7 +329,7 @@ SIMULATOR_HTML = '''
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head><meta charset="UTF-8"><title>محاكي الإشارات</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"></head>
-<body class="bg-dark text-white d-flex align-items: center justify-content: center" style="min-height: 100vh;">
+<body class="bg-dark text-white d-flex align-items-center justify-content: center" style="min-height: 100vh;">
     <div class="container" style="max-width: 450px;">
         <div class="card bg-secondary border-warning p-4 shadow">
             <h4 class="text-warning fw-bold mb-3">📡 محاكاة إشارات ESP32 لقطيع حيواني</h4>
@@ -397,22 +403,55 @@ def simulator():
         msg = "✅ تم تحديث بيانات الشريحة بنجاح!"
     return render_template_string(SIMULATOR_HTML, msg=msg)
 
-@app.route('/api/update-collar', methods=['POST'])
-def api_update_collar():
-    data = request.json
-    tag = data.get('tag_number')
-    temp = float(data.get('temperature', 38.5))
-    lat = float(data.get('lat', 18.0735))
-    lng = float(data.get('lng', -15.9582))
-    health = "✅ سليم 100%" if temp <= 39.0 else "⚠️ اشتباه حمى"
+
+# --- 1. مسار استقبال بيانات الحساسات (درجة الحرارة) من ESP32 ---
+@app.route('/api/sensor_update', methods=['POST'])
+def receive_sensor_data():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data received"}), 400
+        
+    tag = data.get('tag_number', 'TAG-MAURITANIA-01')
+    temperature = data.get('temperature', 38.5)
+    
+    health = "✅ سليم 100%" if float(temperature) <= 39.0 else "⚠️ اشتباه حمى"
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
     conn = sqlite3.connect('livestock_enterprise.db')
     cursor = conn.cursor()
-    cursor.execute('UPDATE animals SET temperature = ?, lat = ?, lng = ?, health_status = ?, last_update = ? WHERE tag_number = ?', (temp, lat, lng, health, now_str, tag))
-    cursor.execute('INSERT INTO telemetry_logs (tag_number, temperature, lat, lng, log_time) VALUES (?, ?, ?, ?, ?)', (tag, temp, lat, lng, now_str))
+    cursor.execute('UPDATE animals SET temperature = ?, health_status = ?, last_update = ? WHERE tag_number = ?', (temperature, health, now_str, tag))
     conn.commit()
     conn.close()
-    return jsonify({"status": "success", "message": "Telemetry received successfully!"})
+    
+    return jsonify({"status": "success", "message": "Sensor data received!"}), 200
+
+
+# --- 2. مسارات استقبال وعرض صور الكاميرا الحية من ESP32-CAM ---
+UPLOAD_FOLDER_CAM = 'static/uploads'
+os.makedirs(UPLOAD_FOLDER_CAM, exist_ok=True)
+latest_image_path = os.path.join(UPLOAD_FOLDER_CAM, 'latest_livestock.jpg')
+
+@app.route('/api/upload_image', methods=['POST'])
+def upload_image():
+    if request.data:
+        with open(latest_image_path, 'wb') as f:
+            f.write(request.data)
+        return jsonify({"status": "success"}), 200
+        
+    if 'imageFile' not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+    
+    file = request.files['imageFile']
+    file.save(latest_image_path)
+    return jsonify({"status": "success"}), 200
+
+@app.route('/api/get_image', methods=['GET'])
+def get_image():
+    from flask import send_file
+    if os.path.exists(latest_image_path):
+        return send_file(latest_image_path, mimetype='image/jpeg')
+    return "No image", 404
+
 
 @app.route('/logout')
 def logout(): session.pop('admin_logged', None); return redirect(url_for('admin_login'))
@@ -535,35 +574,3 @@ def delete_market(id):
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
-    # تخزين مؤقت لآخر قراءة من الحساس
-latest_sensor_data = {
-    "temperature": 0.0,
-    "status": "No data yet"
-}
-
-@app.route('/api/sensor_update', methods=['POST'])
-def receive_sensor_data():
-    global latest_sensor_data
-    data = request.get_json()
-    
-    if not data:
-        return jsonify({"error": "No data received"}), 400
-        
-    # استخراج البيانات المرسلة من ESP32
-    temperature = data.get('temperature')
-    device_id = data.get('device_id')
-    
-    # تحديث القيم المؤقتة لتظهر في لوحة التحكم لاحقاً
-    latest_sensor_data = {
-        "temperature": temperature,
-        "device_id": device_id,
-        "status": "Active"
-    }
-    
-    print(f"Received from ESP32 -> Temp: {temperature}C, Device: {device_id}")
-    
-    return jsonify({"status": "success", "message": "Data received successfully"}), 200
-
-@app.route('/api/get_sensor', methods=['GET'])
-def get_sensor_data():
-    return jsonify(latest_sensor_data), 200
